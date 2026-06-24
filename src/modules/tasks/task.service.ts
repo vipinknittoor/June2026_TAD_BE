@@ -629,8 +629,6 @@ export async function autofillTaskDetails(title: string) {
     throw badRequest('Gemini API key is not configured in the environment variables');
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${env.GEMINI_API_KEY}`;
-
   const payload = {
     contents: [
       {
@@ -668,21 +666,40 @@ export async function autofillTaskDetails(title: string) {
     },
   };
 
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
+  const models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'];
+  let responseText = '';
+  let lastErrorMsg = '';
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw badRequest(`Gemini API error: ${response.statusText} - ${errText}`);
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${env.GEMINI_API_KEY}`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (response.ok) {
+        responseText = await response.text();
+        break;
+      } else {
+        const errText = await response.text();
+        lastErrorMsg = `Gemini API error for model ${model}: ${response.statusText} - ${errText}`;
+      }
+    } catch (error: any) {
+      lastErrorMsg = `Failed to communicate with Gemini API for model ${model}: ${error.message}`;
     }
+  }
 
-    const data: any = await response.json();
+  if (!responseText) {
+    throw badRequest(`AI generation failed. Details: ${lastErrorMsg}`);
+  }
+
+  try {
+    const data: any = JSON.parse(responseText);
+
 
     const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!candidateText) {
