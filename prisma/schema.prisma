@@ -1,0 +1,181 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  ADMIN
+  EMPLOYEE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum TaskStatus {
+  DRAFT
+  ASSIGNED
+  IN_PROGRESS
+  DENIED
+  SUBMITTED
+  APPROVED
+  REOPENED
+}
+
+enum CommentType {
+  GENERAL
+  REVIEW_NOTE
+  REOPEN_COMMENT
+}
+
+model User {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name          String
+  email         String   @unique
+  passwordHash  String
+  role          Role     @default(EMPLOYEE)
+  title         String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  tasksAssigned      Task[]         @relation("AssignedBy")
+  tasksReviewed      Task[]         @relation("ReviewingManager")
+  tasksParticipated  Task[]         @relation("TaskAssignees")
+  comments           Comment[]
+  attachments        Attachment[]
+  auditLogs          AuditLog[]
+  effortLogs         EffortLog[]
+  notifications      Notification[]
+  refreshTokens      RefreshToken[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model Task {
+  id                   String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title                String
+  description          String     @db.Text
+  goal                 String     @db.Text
+  startDate            DateTime   @db.Date
+  endDate              DateTime   @db.Date
+  priority             Priority   @default(MEDIUM)
+  status               TaskStatus @default(DRAFT)
+  isActive             Boolean    @default(true)
+  effortHours          Float      @default(0)
+  acceptanceCriteria   String     @db.Text
+  denialReason         String?    @db.Text
+  actualCompletionDate DateTime?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  assignedById       String @db.Uuid
+  assignedBy         User   @relation("AssignedBy", fields: [assignedById], references: [id], onDelete: Cascade)
+  reviewingManagerId String @db.Uuid
+  reviewingManager   User   @relation("ReviewingManager", fields: [reviewingManagerId], references: [id], onDelete: Cascade)
+  assignees          User[] @relation("TaskAssignees")
+
+  comments      Comment[]
+  attachments   Attachment[]
+  auditLogs     AuditLog[]
+  effortLogs    EffortLog[]
+  notifications Notification[]
+
+  @@index([status])
+  @@index([assignedById])
+  @@index([reviewingManagerId])
+  @@map("tasks")
+}
+
+model Comment {
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId    String      @db.Uuid
+  task      Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String      @db.Uuid
+  author    User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  type      CommentType @default(GENERAL)
+  text      String      @db.Text
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
+
+  @@index([taskId])
+  @@map("comments")
+}
+
+model Attachment {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId       String   @db.Uuid
+  task         Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploadedById String   @db.Uuid
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id], onDelete: Cascade)
+  fileUrl      String   @db.Text
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  @@map("attachments")
+}
+
+model AuditLog {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId    String   @db.Uuid
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actorId   String   @db.Uuid
+  actor     User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  action    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model EffortLog {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  taskId    String   @db.Uuid
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  actorId   String   @db.Uuid
+  actor     User     @relation(fields: [actorId], references: [id], onDelete: Cascade)
+  hours     Float
+  note      String   @db.Text
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("effort_logs")
+}
+
+model Notification {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  taskId    String?  @db.Uuid
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  event     String   @db.VarChar(50)
+  message   String   @db.Text
+  read      Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+  @@map("notifications")
+}
+
+model RefreshToken {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique @db.Text
+  accessTokenId String?  @unique
+  expiresAt DateTime
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
