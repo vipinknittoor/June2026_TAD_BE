@@ -12,6 +12,7 @@ import userRouter from './modules/users/user.routes';
 import taskRouter from './modules/tasks/task.routes';
 import notificationRouter from './modules/notifications/notification.routes';
 import pushRouter from './modules/notifications/push.routes';
+import agentRouter from './modules/agent/agent.routes';
 
 const app = express();
 
@@ -57,6 +58,7 @@ app.use('/api/v1/users', userRouter);
 app.use('/api/v1/tasks', taskRouter);
 app.use('/api/v1/notifications', notificationRouter);
 app.use('/api/v1/push', pushRouter);
+app.use('/api/v1/agent', agentRouter);
 
 // Global Error Handler
 app.use((err: unknown, req: Request, res: Response, next: NextFunction): void => {
