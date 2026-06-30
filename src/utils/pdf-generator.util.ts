@@ -25,8 +25,29 @@ export async function generatePDFReport(
         fs.mkdirSync(reportsDir, { recursive: true });
       }
 
+      // Automatically switch to landscape orientation if there are more than 6 columns
+      const isLandscape = columns.length > 6;
+      const printableWidth = isLandscape ? 742 : 495;
+      const pageBoundaryY = isLandscape ? 520 : 770;
+      const footerY = isLandscape ? 530 : 780;
+
+      // Scale column widths to fit the printable width exactly
+      const totalWidthDefault = columns.reduce((acc, col) => acc + col.width, 0);
+      if (totalWidthDefault > 0) {
+        const scale = printableWidth / totalWidthDefault;
+        columns = columns.map(col => ({
+          ...col,
+          width: Math.floor(col.width * scale)
+        }));
+      }
+
       const filePath = path.join(reportsDir, filename);
-      const doc = new PDFDocument({ margin: 50, size: 'A4', bufferPages: true });
+      const doc = new PDFDocument({
+        margin: 50,
+        size: 'A4',
+        layout: isLandscape ? 'landscape' : 'portrait',
+        bufferPages: true
+      });
       const stream = fs.createWriteStream(filePath);
       doc.pipe(stream);
 
@@ -63,7 +84,7 @@ export async function generatePDFReport(
           doc.text(col.label, currentX + 5, startY + 7, {
             width: col.width - 10,
             align: 'left',
-            lineBreak: false
+            lineBreak: true // Wrap headers nicely to prevent cutting off words
           });
           currentX += col.width;
         });
@@ -75,21 +96,9 @@ export async function generatePDFReport(
 
       // Draw rows
       data.forEach((row, rowIndex) => {
-        // Page boundary check: A4 height is 842. Margins 50 points top/bottom.
-        if (y > 720) {
-          doc.addPage();
-          y = 50;
-          drawHeader(y);
-          y += 24;
-        }
-
-        // Alternating row background shading
-        if (rowIndex % 2 === 1) {
-          doc.rect(startX, y, totalWidth, 20).fill(altRowBg);
-        }
-
-        doc.fillColor(textColor).fontSize(8.5);
-        let cellX = startX;
+        // Pre-format all cell values and calculate required row height
+        const formattedRow: Record<string, string> = {};
+        let maxRowHeight = 20; // Default minimum row height
 
         columns.forEach(col => {
           let val = row[col.key];
@@ -101,7 +110,7 @@ export async function generatePDFReport(
             val = val.toLocaleDateString();
           } else if (typeof val === 'object') {
             if (Array.isArray(val)) {
-              val = val.map(item => item.name || item.email || item.id || JSON.stringify(item)).join(', ');
+              val = val.map((item: any) => item.name || item.email || item.id || JSON.stringify(item)).join(', ');
             } else {
               val = val.name || val.email || JSON.stringify(val);
             }
@@ -109,24 +118,54 @@ export async function generatePDFReport(
             val = String(val);
           }
 
+          formattedRow[col.key] = val;
+
+          // Set temporary doc font size for accurate height check
+          doc.fontSize(8.5);
+          const cellHeight = doc.heightOfString(val, {
+            width: col.width - 10,
+          }) + 10; // 10 points total padding (5 points top, 5 points bottom)
+
+          if (cellHeight > maxRowHeight) {
+            maxRowHeight = cellHeight;
+          }
+        });
+
+        // Page boundary check: We use pageBoundaryY dynamically depending on orientation
+        if (y + maxRowHeight > pageBoundaryY) {
+          doc.addPage();
+          y = 50;
+          drawHeader(y);
+          y += 24;
+        }
+
+        // Alternating row background shading using dynamic maxRowHeight
+        if (rowIndex % 2 === 1) {
+          doc.rect(startX, y, totalWidth, maxRowHeight).fill(altRowBg);
+        }
+
+        doc.fillColor(textColor).fontSize(8.5);
+        let cellX = startX;
+
+        columns.forEach(col => {
+          const val = formattedRow[col.key];
+
           doc.text(val, cellX + 5, y + 5, {
             width: col.width - 10,
-            height: 12,
-            ellipsis: true,
-            lineBreak: false
+            lineBreak: true
           });
 
           cellX += col.width;
         });
 
-        // Bottom border line for row
-        doc.moveTo(startX, y + 20)
-          .lineTo(startX + totalWidth, y + 20)
+        // Bottom border line for row using dynamic maxRowHeight
+        doc.moveTo(startX, y + maxRowHeight)
+          .lineTo(startX + totalWidth, y + maxRowHeight)
           .strokeColor(borderColor)
           .lineWidth(0.5)
           .stroke();
 
-        y += 20;
+        y += maxRowHeight;
       });
 
       // Total Pages Pagination Footer
@@ -138,7 +177,7 @@ export async function generatePDFReport(
           .text(
             `Page ${i + 1} of ${range.count}`,
             50,
-            780,
+            footerY,
             { align: 'center', width: doc.page.width - 100 }
           );
       }

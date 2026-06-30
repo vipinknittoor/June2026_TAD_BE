@@ -3,7 +3,7 @@ import { prisma } from '../../config/db';
 import { env } from '../../config/env';
 import { badRequest } from '../../utils/errors.util';
 import { generatePDFReport, PDFTableColumn } from '../../utils/pdf-generator.util';
-import { PrismaQuerySpec } from './agent.types';
+import { PrismaQuerySpec, ChatMessage } from './agent.types';
 
 // Supported models for dynamic querying
 const ALLOWED_MODELS = ['task', 'user', 'effortLog', 'comment'];
@@ -18,6 +18,14 @@ export const AgentStateAnnotation = Annotation.Root({
   prompt: Annotation<string>({
     reducer: (a, b) => b ?? a,
     default: () => ''
+  }),
+  history: Annotation<ChatMessage[] | null>({
+    reducer: (a, b) => b ?? a,
+    default: () => null
+  }),
+  preferredModel: Annotation<string | null>({
+    reducer: (a, b) => b ?? a,
+    default: () => null
   }),
   querySpec: Annotation<PrismaQuerySpec | null>({
     reducer: (a, b) => b ?? a,
@@ -63,8 +71,18 @@ function cleanAndParseJSON(text: string): any {
 /**
  * Direct HTTPS REST call to Gemini with model fallback matching task.service.ts
  */
-async function callGeminiAPI(promptText: string): Promise<string> {
-  const models = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-flash-lite-latest'];
+async function callGeminiAPI(promptText: string, preferredModel?: string | null): Promise<string> {
+  let models = [
+    'gemini-2.0-flash',
+    'gemini-1.5-pro',
+    'gemini-3.5-flash',
+    'gemini-1.5-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-flash-lite-latest'
+  ];
+  if (preferredModel && models.includes(preferredModel)) {
+    models = [preferredModel, ...models.filter(m => m !== preferredModel)];
+  }
   let responseText = '';
   let lastErrorMsg = '';
 
@@ -147,34 +165,67 @@ function parseDatesRecursive(obj: any): any {
   return obj;
 }
 
-/**
- * Resolves standard table report headers based on target query model.
- */
-function getColumnsForModel(modelName: string, sampleRecord?: any): PDFTableColumn[] {
-  if (sampleRecord && typeof sampleRecord === 'object') {
+const KNOWN_COLUMNS: Record<string, { label: string; defaultWidth: number }> = {
+  title: { label: 'Title', defaultWidth: 140 },
+  status: { label: 'Status', defaultWidth: 75 },
+  priority: { label: 'Priority', defaultWidth: 55 },
+  startDate: { label: 'Start Date', defaultWidth: 80 },
+  endDate: { label: 'End Date', defaultWidth: 80 },
+  effortHours: { label: 'Hours', defaultWidth: 40 },
+  description: { label: 'Description', defaultWidth: 160 },
+  goal: { label: 'Goal', defaultWidth: 140 },
+  acceptanceCriteria: { label: 'Acceptance Criteria', defaultWidth: 160 },
+  denialReason: { label: 'Denial Reason', defaultWidth: 100 },
+  actualCompletionDate: { label: 'Completion Date', defaultWidth: 90 },
+  name: { label: 'Name', defaultWidth: 130 },
+  email: { label: 'Email', defaultWidth: 170 },
+  role: { label: 'Role', defaultWidth: 70 },
+  hours: { label: 'Hours', defaultWidth: 50 },
+  note: { label: 'Progress Note', defaultWidth: 220 },
+  createdAt: { label: 'Date', defaultWidth: 100 },
+  text: { label: 'Comment Text', defaultWidth: 250 },
+  type: { label: 'Type', defaultWidth: 80 }
+};
+
+function getColumnsForModel(modelName: string, sampleRecord?: any, customColumns?: string[] | null): PDFTableColumn[] {
+  const normModel = modelName.toLowerCase();
+
+  // If custom columns list is specified by the LLM:
+  if (customColumns && customColumns.length > 0) {
     const excludedKeys = [
       "id",
       "passwordHash",
       "isActive",
       "assignedById",
-      "reviewingManagerId",
-      "createdAt",
-      "updatedAt"
+      "reviewingManagerId"
     ];
-    const keys = Object.keys(sampleRecord).filter(
-      k => !excludedKeys.includes(k) && typeof sampleRecord[k] !== 'function'
-    );
-    
-    // Allocate widths dynamically up to a maximum of 490 points (A4 printable width)
-    const defaultWidth = Math.floor(490 / Math.max(1, keys.length));
-    return keys.map(key => ({
-      key,
-      label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
-      width: defaultWidth
-    }));
+    const filteredColumns = customColumns.filter(key => !excludedKeys.includes(key));
+
+    let columns = filteredColumns.map(key => {
+      const known = KNOWN_COLUMNS[key];
+      let label = known ? known.label : key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1');
+      if (key === 'title' && normModel === 'user') {
+        label = 'Job Title';
+      }
+      return {
+        key,
+        label,
+        width: known ? known.defaultWidth : 80
+      };
+    });
+
+    const totalWidth = columns.reduce((acc, col) => acc + col.width, 0);
+    if (totalWidth > 0) {
+      const scale = 490 / totalWidth;
+      columns = columns.map(col => ({
+        ...col,
+        width: Math.floor(col.width * scale)
+      }));
+    }
+    return columns;
   }
 
-  const normModel = modelName.toLowerCase();
+  // Pre-defined defaults:
   if (normModel === 'task') {
     return [
       { key: 'title', label: 'Title', width: 140 },
@@ -211,9 +262,21 @@ function getColumnsForModel(modelName: string, sampleRecord?: any): PDFTableColu
   }
 
   if (sampleRecord && typeof sampleRecord === 'object') {
-    const keys = Object.keys(sampleRecord).filter(k => k !== 'id' && typeof sampleRecord[k] !== 'function');
-    const defaultWidth = Math.floor(470 / Math.max(1, keys.length));
-    return keys.slice(0, 6).map(key => ({
+    const excludedKeys = [
+      "id",
+      "passwordHash",
+      "isActive",
+      "assignedById",
+      "reviewingManagerId",
+      "createdAt",
+      "updatedAt"
+    ];
+    const keys = Object.keys(sampleRecord).filter(
+      k => !excludedKeys.includes(k) && typeof sampleRecord[k] !== 'function'
+    );
+    
+    const defaultWidth = Math.floor(490 / Math.max(1, keys.length));
+    return keys.map(key => ({
       key,
       label: key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1'),
       width: defaultWidth
@@ -287,6 +350,8 @@ Available Prisma models:
 CRITICAL RULES:
 - If the user's message is a greeting (e.g., "hi", "hello"), social chat, or a general question about how to use the assistant (e.g., "what can you do?"), set "isConversational" to true, populate "reply" with a helpful conversational message, and set "model", "operation", and "args" to null.
 - Otherwise, if it is a request for database records, stats, reports, or counts, set "isConversational" to false and "reply" to null, and build the Prisma query.
+- You are connected to a backend execution engine that HAS full capability to run database queries and compile them into PDF files dynamically. When the user requests to download, export, generate, or get a PDF/file/report of some information, you MUST trigger the query spec with "generatePDF": true. Do NOT output a conversational message stating you cannot generate files or retrieve information.
+- Resolve relative references like "above", "this", "it", or "its" (e.g., "generate its pdf" or "download report for this") by inspecting the CONVERSATION HISTORY and rebuilding the previous database query with "generatePDF": true.
 - You must ONLY use the following models for database queries: ${ALLOWED_MODELS.join(', ')}
 - You must ONLY use the following read-only operations: ${ALLOWED_OPERATIONS.join(', ')}
 - Always query with "isActive: true" in your "where" filter to exclude deleted entries.
@@ -294,6 +359,15 @@ CRITICAL RULES:
 - Limit all database lists by adding "take: 100" in your args.
 - Output ONLY a raw valid JSON object. Do not include markdown code ticks.
 `;
+
+  const formattedHistory = state.history && state.history.length > 0
+    ? `\nCONVERSATION HISTORY:\n${state.history.map(h => {
+        const rawRole = String(h.role || 'user').toLowerCase();
+        const role = (rawRole === 'user' || rawRole === 'human') ? 'USER' : 'MODEL';
+        const msg = (h as any).message || (h as any).text || (h as any).content || '';
+        return `${role}: ${msg}`;
+      }).join('\n')}\n`
+    : '';
 
   const errorHistory = state.error 
     ? `\nPREVIOUS ERROR:
@@ -308,12 +382,19 @@ Analyze the user request, formulate the appropriate action matching the schema c
 
 SCHEMA CONTEXT:
 ${schemaContext}
+${formattedHistory}
 ${errorHistory}
 
 USER REQUEST: "${state.prompt}"
 
 CRITICAL INSTRUCTION FOR generatePDF:
 Determine if the user is asking to generate a PDF report, file, document, or download. If so, set the "generatePDF" field to true. If not (or if it is conversational), set "generatePDF" to false.
+
+CRITICAL INSTRUCTION FOR pdfColumns:
+If generatePDF is true, check if the user specified certain columns/fields or "all columns" they want to see.
+If they specified certain fields (e.g. "only title and status"), set the "pdfColumns" field to an array of matching field names from the schema (e.g., ["title", "status"]).
+If they requested "all columns", set "pdfColumns" to an array containing ALL valid scalar field names from the targeted schema.
+Otherwise, set "pdfColumns" to null to use the default visual layout.
 
 Return your plan strictly in this JSON format:
 {
@@ -327,12 +408,13 @@ Return your plan strictly in this JSON format:
     "orderBy": { ... },
     "take": 100
   } | null,
-  "generatePDF": true | false
+  "generatePDF": true | false,
+  "pdfColumns": ["col1", "col2", ...] | null
 }
 `;
 
   try {
-    const textContent = await callGeminiAPI(promptText);
+    const textContent = await callGeminiAPI(promptText, state.preferredModel);
     const querySpec = cleanAndParseJSON(textContent) as PrismaQuerySpec;
     return {
       querySpec,
@@ -439,7 +521,7 @@ async function generateFileNode(state: AgentStateSchema) {
 
   try {
     const sample = state.queryResults[0];
-    const columns = getColumnsForModel(modelName, sample);
+    const columns = getColumnsForModel(modelName, sample, state.querySpec?.pdfColumns);
     const pdfUrl = await generatePDFReport(filename, title, columns, state.queryResults);
 
     return { pdfUrl };
@@ -478,9 +560,15 @@ export const agentGraph = workflow.compile();
 /**
  * Execute the agent with a given prompt
  */
-export async function executeAgentQuery(prompt: string): Promise<AgentStateSchema> {
+export async function executeAgentQuery(
+  prompt: string,
+  history?: ChatMessage[],
+  preferredModel?: string | null
+): Promise<AgentStateSchema> {
   const initialState = {
     prompt,
+    history: history || null,
+    preferredModel: preferredModel || null,
     querySpec: null,
     queryResults: null,
     error: null,
